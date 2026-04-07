@@ -18,7 +18,7 @@ except ImportError:  # pragma: no cover - exercised only when Plotly is absent.
     go = None
 
 
-APP_TITLE = "Customer Segmentation Services"
+APP_TITLE = "Dịch vụ Phân khúc Khách hàng"
 COLOR_PALETTE = [
     "#0F4C5C",
     "#E36414",
@@ -117,7 +117,7 @@ def run_segmentation(X_scaled: np.ndarray, n_groups: int) -> SegmentationResult:
         elbow_model.fit(X_scaled)
         elbow_rows.append(
             {
-                "Number of Groups": group_count,
+                "Số lượng nhóm": group_count,
                 "WCSS": float(elbow_model.inertia_),
             }
         )
@@ -145,7 +145,7 @@ def run_segmentation(X_scaled: np.ndarray, n_groups: int) -> SegmentationResult:
 def build_group_name_map(labels: np.ndarray) -> dict[int, str]:
     unique_labels = sorted(int(label) for label in np.unique(labels))
     return {
-        label: f"Group {position}"
+        label: f"Nhóm {position}"
         for position, label in enumerate(unique_labels, start=1)
     }
 
@@ -167,12 +167,12 @@ def build_export_df(df_original: pd.DataFrame, labels: np.ndarray) -> pd.DataFra
 
 def describe_silhouette(score: float | None) -> tuple[str, str]:
     if score is None:
-        return "Not enough variation to score", "#6C757D"
+        return "Không đủ khác biệt để chấm điểm", "#6C757D"
     if score > 0.5:
-        return "Excellent Separation", "#2E7D32"
+        return "Tách biệt rất tốt", "#2E7D32"
     if score >= 0.2:
-        return "Fair Separation", "#F9A825"
-    return "Weak Clusters", "#C62828"
+        return "Tách biệt trung bình", "#F9A825"
+    return "Cụm yếu", "#C62828"
 
 
 def figure_support_available() -> bool:
@@ -206,7 +206,7 @@ def build_pca_figure(
                     "opacity": 0.8,
                     "color": color_map[group_name],
                 },
-                hovertemplate="Group=%{text}<br>PC1=%{x:.2f}<br>PC2=%{y:.2f}<extra></extra>",
+                hovertemplate="Nhóm=%{text}<br>PC1=%{x:.2f}<br>PC2=%{y:.2f}<extra></extra>",
                 text=[group_name] * int(mask.sum()),
             )
         )
@@ -218,7 +218,7 @@ def build_pca_figure(
     for label, group_name in group_name_map.items():
         representative_x.append(representative_coordinates[label, 0])
         representative_y.append(representative_coordinates[label, 1])
-        representative_names.append(f"{group_name} Representative")
+        representative_names.append(f"{group_name} đại diện")
         representative_colors.append(color_map[group_name])
 
     fig.add_trace(
@@ -226,7 +226,7 @@ def build_pca_figure(
             x=representative_x,
             y=representative_y,
             mode="markers+text",
-            name="Group Representatives",
+            name="Đại diện nhóm",
             marker={
                 "symbol": "x",
                 "size": 18,
@@ -240,10 +240,10 @@ def build_pca_figure(
     )
 
     fig.update_layout(
-        title="Master Insight Map",
+        title="Bản đồ Insight tổng quan",
         xaxis_title="PC1",
         yaxis_title="PC2",
-        legend_title="Groups",
+        legend_title="Nhóm",
         template="plotly_white",
         height=560,
     )
@@ -275,17 +275,17 @@ def build_variable_explorer_figure(
                 marker={"size": 10, "opacity": 0.8, "color": color},
                 hovertemplate=(
                     f"{x_axis}=%{{x:.2f}}<br>{y_axis}=%{{y:.2f}}"
-                    "<br>Group=%{text}<extra></extra>"
+                    "<br>Nhóm=%{text}<extra></extra>"
                 ),
                 text=[group_name] * int(mask.sum()),
             )
         )
 
     fig.update_layout(
-        title="Variable Explorer",
+        title="Khám phá biến",
         xaxis_title=x_axis,
         yaxis_title=y_axis,
-        legend_title="Groups",
+        legend_title="Nhóm",
         template="plotly_white",
         height=520,
     )
@@ -299,7 +299,7 @@ def build_wcss_figure(wcss_by_group_count: pd.DataFrame) -> "go.Figure":
     fig = go.Figure(
         data=[
             go.Scatter(
-                x=wcss_by_group_count["Number of Groups"],
+                x=wcss_by_group_count["Số lượng nhóm"],
                 y=wcss_by_group_count["WCSS"],
                 mode="lines+markers",
                 line={"color": COLOR_PALETTE[0], "width": 3},
@@ -308,8 +308,8 @@ def build_wcss_figure(wcss_by_group_count: pd.DataFrame) -> "go.Figure":
         ]
     )
     fig.update_layout(
-        title="Elbow View of Group Quality",
-        xaxis_title="Number of Groups",
+        title="Đường Elbow đánh giá chất lượng nhóm",
+        xaxis_title="Số lượng nhóm",
         yaxis_title="WCSS",
         template="plotly_white",
         height=380,
@@ -325,8 +325,8 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 def show_plotly_missing_message() -> None:
     st.warning(
-        "Interactive charts need Plotly. Install the packages in requirements.txt "
-        "before launching the dashboard locally."
+        "Biểu đồ tương tác cần Plotly. Hãy cài đủ thư viện trong requirements.txt "
+        "trước khi chạy dashboard ở máy local."
     )
 
 
@@ -334,74 +334,74 @@ def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
     st.caption(
-        "Upload a CSV to automatically clean numeric fields, form customer groups, "
-        "and explore the result in business-friendly visuals."
+        "Tải CSV lên để tự động làm sạch dữ liệu số, tạo nhóm khách hàng, "
+        "và khám phá kết quả bằng biểu đồ dễ hiểu cho nghiệp vụ."
     )
 
     uploaded_file = st.file_uploader(
-        "Upload a CSV file",
+        "Tải lên tệp CSV",
         type=["csv"],
-        help="Drag and drop any customer or operational CSV to begin.",
+        help="Kéo thả bất kỳ tệp CSV khách hàng hoặc vận hành để bắt đầu.",
     )
 
     with st.sidebar:
-        st.header("Controls")
+        st.header("Điều khiển")
         show_elbow = st.toggle(
-            "Show elbow method",
+            "Hiện biểu đồ Elbow",
             value=False,
-            help="This compares different group counts so you can see when the model stops improving.",
+            help="So sánh nhiều mức số lượng nhóm để xem khi nào mô hình cải thiện chậm lại.",
         )
 
-    st.header("1. Data Onboarding")
+    st.header("1. Nạp dữ liệu")
     if uploaded_file is None:
-        st.info("Upload a CSV file to unlock the dashboard.")
+        st.info("Hãy tải lên tệp CSV để bắt đầu phân tích.")
         return
 
     try:
         df = pd.read_csv(uploaded_file)
     except Exception as exc:  # pragma: no cover - depends on file input behavior.
-        st.error(f"We could not read that CSV file: {exc}")
+        st.error(f"Không thể đọc tệp CSV này: {exc}")
         return
 
     if df.empty:
-        st.error("This CSV has no data rows. Upload a file with at least two rows.")
+        st.error("CSV không có dòng dữ liệu. Hãy tải tệp có ít nhất hai dòng.")
         return
 
     prepared = prepare_numeric_features(df)
 
     preview_col, health_col = st.columns([2.3, 1.2])
     with preview_col:
-        st.subheader("Data Preview")
+        st.subheader("Xem trước dữ liệu")
         st.dataframe(df.head(100), use_container_width=True)
 
     with health_col:
-        st.subheader("Health Report")
-        st.metric("Rows", len(df))
-        st.metric("Numeric Features", len(prepared.numeric_columns))
-        st.metric("Auto-fixed Missing Values", prepared.missing_values_fixed)
+        st.subheader("Báo cáo dữ liệu")
+        st.metric("Số dòng", len(df))
+        st.metric("Số cột số", len(prepared.numeric_columns))
+        st.metric("Giá trị thiếu đã tự sửa", prepared.missing_values_fixed)
         if prepared.numeric_columns:
-            st.write("Numeric columns in scope:")
+            st.write("Các cột số được dùng:")
             st.write(", ".join(prepared.numeric_columns))
         else:
-            st.write("Numeric columns in scope: none")
+            st.write("Các cột số được dùng: không có")
 
     if not prepared.numeric_columns:
-        st.error("This file has no numeric columns, so the grouping engine cannot run.")
+        st.error("Tệp này không có cột số nên không thể chạy phân nhóm.")
         return
 
     row_count = len(df.index)
     if row_count < 2:
-        st.error("At least two rows are required to form groups.")
+        st.error("Cần ít nhất hai dòng dữ liệu để phân nhóm.")
         return
 
     max_groups = min(10, row_count)
     with st.sidebar:
         number_of_groups = st.slider(
-            "Number of Groups",
+            "Số lượng nhóm",
             min_value=2,
             max_value=max_groups,
             value=min(4, max_groups),
-            help="Choose how many customer groups the model should create.",
+            help="Chọn số nhóm khách hàng mà mô hình sẽ tạo.",
         )
 
     segmentation = run_segmentation(prepared.scaled_array, number_of_groups)
@@ -409,7 +409,7 @@ def main() -> None:
     color_map = build_color_map(segmentation.labels)
     silhouette_label, silhouette_color = describe_silhouette(segmentation.silhouette_value)
 
-    st.header("2. The Master Insight")
+    st.header("2. Insight tổng quan")
     metric_col, explainer_col = st.columns([1, 2])
     with metric_col:
         metric_value = (
@@ -417,7 +417,7 @@ def main() -> None:
             if segmentation.silhouette_value is not None
             else "N/A"
         )
-        st.metric("Separation Score", metric_value)
+        st.metric("Điểm tách biệt", metric_value)
         st.markdown(
             (
                 f"<div style='color:{silhouette_color}; font-weight:600;'>"
@@ -427,15 +427,15 @@ def main() -> None:
         )
     with explainer_col:
         st.info(
-            "PCA creates a simplified map of complex customer data so you can see how "
-            "groups separate at a glance. The separation score tells you how clearly "
-            "those groups differ from each other."
+            "PCA tạo một bản đồ đơn giản từ dữ liệu nhiều chiều để bạn nhìn nhanh "
+            "mức độ tách biệt giữa các nhóm. Điểm tách biệt cho biết các nhóm khác "
+            "nhau rõ đến mức nào."
         )
 
     if len(prepared.numeric_columns) < 2:
         st.info(
-            "The Master Insight map needs at least two numeric columns. Grouping still runs, "
-            "but the 2D PCA view is disabled for this file."
+            "Bản đồ Insight cần ít nhất hai cột số. Hệ thống vẫn phân nhóm, "
+            "nhưng sẽ tắt biểu đồ PCA 2D cho tệp này."
         )
     elif not figure_support_available():
         show_plotly_missing_message()
@@ -457,25 +457,24 @@ def main() -> None:
         elif not figure_support_available():
             show_plotly_missing_message()
 
-    st.header("3. Variable Explorer")
+    st.header("3. Khám phá biến")
     st.info(
-        "This view keeps the original units, so business users can inspect how groups "
-        "look in familiar measures such as income, spend, or age."
+        "Biểu đồ này giữ nguyên đơn vị gốc để người dùng nghiệp vụ xem các nhóm "
+        "theo những thước đo quen thuộc như thu nhập, chi tiêu, hoặc độ tuổi."
     )
     if len(prepared.numeric_columns) < 2:
         st.info(
-            "The Variable Explorer needs at least two numeric columns to compare one measure "
-            "against another."
+            "Khám phá biến cần ít nhất hai cột số để so sánh giữa các thước đo."
         )
     elif not figure_support_available():
         show_plotly_missing_message()
     else:
         x_col, y_col = st.columns(2)
         with x_col:
-            x_axis = st.selectbox("X-axis", prepared.numeric_columns, index=0)
+            x_axis = st.selectbox("Trục X", prepared.numeric_columns, index=0)
         with y_col:
             default_y_index = 1 if len(prepared.numeric_columns) > 1 else 0
-            y_axis = st.selectbox("Y-axis", prepared.numeric_columns, index=default_y_index)
+            y_axis = st.selectbox("Trục Y", prepared.numeric_columns, index=default_y_index)
 
         variable_figure = build_variable_explorer_figure(
             df=prepared.numeric_df,
@@ -486,13 +485,13 @@ def main() -> None:
         )
         st.plotly_chart(variable_figure, use_container_width=True)
 
-    st.header("4. Export & Action")
+    st.header("4. Xuất dữ liệu")
     st.write(
-        "Download the original records enriched with the model's group assignment so the "
-        "result can be shared or used in downstream tools."
+        "Tải xuống dữ liệu gốc kèm nhãn nhóm do mô hình gán để chia sẻ "
+        "hoặc dùng cho các bước xử lý tiếp theo."
     )
     st.download_button(
-        "Download grouped CSV",
+        "Tải xuống CSV đã gán nhóm",
         data=to_csv_bytes(export_df),
         file_name="customer_segmentation_output.csv",
         mime="text/csv",

@@ -69,4 +69,4 @@ def test_build_export_df_appends_cluster_label() -> None:
     export_df = build_export_df(df, labels)
 
     assert list(export_df.columns) == ["customer_id", "spend", "Cluster_Label"]
-    assert export_df["Cluster_Label"].tolist() == ["Group 2", "Group 2", "Group 1"]
+    assert export_df["Cluster_Label"].tolist() == ["Nhóm 2", "Nhóm 2", "Nhóm 1"]
