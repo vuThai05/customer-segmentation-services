@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from io import BytesIO
-
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -14,7 +12,7 @@ from sklearn.preprocessing import StandardScaler
 
 try:
     import plotly.graph_objects as go
-except ImportError:  # pragma: no cover - exercised only when Plotly is absent.
+except ImportError:  # pragma: no cover - only when Plotly is not installed.
     go = None
 
 
@@ -39,6 +37,7 @@ class PreparedNumericFeatures:
     scaled_array: np.ndarray
     numeric_columns: list[str]
     missing_values_fixed: int
+    imputation_details: pd.DataFrame
     imputer: SimpleImputer | None
     scaler: StandardScaler | None
 
@@ -57,7 +56,6 @@ class SegmentationResult:
 def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
     numeric_df = df.select_dtypes(include=[np.number]).copy()
     numeric_columns = numeric_df.columns.tolist()
-    missing_values_fixed = int(numeric_df.isna().sum().sum())
 
     if not numeric_columns:
         return PreparedNumericFeatures(
@@ -65,9 +63,15 @@ def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
             scaled_array=np.empty((len(df.index), 0)),
             numeric_columns=[],
             missing_values_fixed=0,
+            imputation_details=pd.DataFrame(
+                columns=["Cột", "Số giá trị thiếu đã sửa", "Giá trị thay thế (median)"]
+            ),
             imputer=None,
             scaler=None,
         )
+
+    missing_by_column = numeric_df.isna().sum()
+    missing_values_fixed = int(missing_by_column.sum())
 
     imputer = SimpleImputer(strategy="median")
     cleaned_array = imputer.fit_transform(numeric_df)
@@ -77,6 +81,20 @@ def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
         index=df.index,
     )
 
+    median_by_column = pd.Series(imputer.statistics_, index=numeric_columns)
+    detail_rows: list[dict[str, str | int | float]] = []
+    for column in numeric_columns:
+        fixed_count = int(missing_by_column[column])
+        if fixed_count > 0:
+            detail_rows.append(
+                {
+                    "Cột": column,
+                    "Số giá trị thiếu đã sửa": fixed_count,
+                    "Giá trị thay thế (median)": float(median_by_column[column]),
+                }
+            )
+    imputation_details = pd.DataFrame(detail_rows)
+
     scaler = StandardScaler()
     scaled_array = scaler.fit_transform(cleaned_numeric_df)
 
@@ -85,6 +103,7 @@ def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
         scaled_array=scaled_array,
         numeric_columns=numeric_columns,
         missing_values_fixed=missing_values_fixed,
+        imputation_details=imputation_details,
         imputer=imputer,
         scaler=scaler,
     )
@@ -241,8 +260,8 @@ def build_pca_figure(
 
     fig.update_layout(
         title="Bản đồ Insight tổng quan",
-        xaxis_title="PC1",
-        yaxis_title="PC2",
+        xaxis_title="PC1 (Thành phần chính 1)",
+        yaxis_title="PC2 (Thành phần chính 2)",
         legend_title="Nhóm",
         template="plotly_white",
         height=560,
@@ -310,7 +329,7 @@ def build_wcss_figure(wcss_by_group_count: pd.DataFrame) -> "go.Figure":
     fig.update_layout(
         title="Đường Elbow đánh giá chất lượng nhóm",
         xaxis_title="Số lượng nhóm",
-        yaxis_title="WCSS",
+        yaxis_title="WCSS (Within-Cluster Sum of Squares)",
         template="plotly_white",
         height=380,
     )
@@ -318,9 +337,8 @@ def build_wcss_figure(wcss_by_group_count: pd.DataFrame) -> "go.Figure":
 
 
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    buffer = BytesIO()
-    buffer.write(df.to_csv(index=False).encode("utf-8"))
-    return buffer.getvalue()
+    # utf-8-sig adds BOM so Vietnamese text like "Nhóm" opens correctly in Excel.
+    return df.to_csv(index=False).encode("utf-8-sig")
 
 
 def show_plotly_missing_message() -> None:
@@ -338,21 +356,13 @@ def main() -> None:
         "và khám phá kết quả bằng biểu đồ dễ hiểu cho nghiệp vụ."
     )
 
+    st.header("1. Nạp dữ liệu")
     uploaded_file = st.file_uploader(
         "Tải lên tệp CSV",
         type=["csv"],
         help="Kéo thả bất kỳ tệp CSV khách hàng hoặc vận hành để bắt đầu.",
     )
 
-    with st.sidebar:
-        st.header("Điều khiển")
-        show_elbow = st.toggle(
-            "Hiện biểu đồ Elbow",
-            value=False,
-            help="So sánh nhiều mức số lượng nhóm để xem khi nào mô hình cải thiện chậm lại.",
-        )
-
-    st.header("1. Nạp dữ liệu")
     if uploaded_file is None:
         st.info("Hãy tải lên tệp CSV để bắt đầu phân tích.")
         return
@@ -378,12 +388,22 @@ def main() -> None:
         st.subheader("Báo cáo dữ liệu")
         st.metric("Số dòng", len(df))
         st.metric("Số cột số", len(prepared.numeric_columns))
-        st.metric("Giá trị thiếu đã tự sửa", prepared.missing_values_fixed)
+        st.metric("Tổng giá trị thiếu đã tự sửa", prepared.missing_values_fixed)
         if prepared.numeric_columns:
             st.write("Các cột số được dùng:")
             st.write(", ".join(prepared.numeric_columns))
         else:
             st.write("Các cột số được dùng: không có")
+
+    if prepared.missing_values_fixed > 0 and not prepared.imputation_details.empty:
+        st.write("Chi tiết các giá trị thiếu đã tự sửa:")
+        st.dataframe(
+            prepared.imputation_details,
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("Không có giá trị thiếu cần tự sửa trong các cột số.")
 
     if not prepared.numeric_columns:
         st.error("Tệp này không có cột số nên không thể chạy phân nhóm.")
@@ -394,14 +414,22 @@ def main() -> None:
         st.error("Cần ít nhất hai dòng dữ liệu để phân nhóm.")
         return
 
+    st.subheader("Thiết lập mô hình")
     max_groups = min(10, row_count)
-    with st.sidebar:
+    control_left, control_right = st.columns([1.5, 1.0])
+    with control_left:
         number_of_groups = st.slider(
             "Số lượng nhóm",
             min_value=2,
             max_value=max_groups,
             value=min(4, max_groups),
             help="Chọn số nhóm khách hàng mà mô hình sẽ tạo.",
+        )
+    with control_right:
+        show_elbow = st.toggle(
+            "Hiện biểu đồ Elbow",
+            value=False,
+            help="Biểu đồ này giúp bạn so sánh chất lượng khi thay đổi số lượng nhóm.",
         )
 
     segmentation = run_segmentation(prepared.scaled_array, number_of_groups)
@@ -419,17 +447,13 @@ def main() -> None:
         )
         st.metric("Điểm tách biệt", metric_value)
         st.markdown(
-            (
-                f"<div style='color:{silhouette_color}; font-weight:600;'>"
-                f"{silhouette_label}</div>"
-            ),
+            f"<div style='color:{silhouette_color}; font-weight:600;'>{silhouette_label}</div>",
             unsafe_allow_html=True,
         )
     with explainer_col:
         st.info(
-            "PCA tạo một bản đồ đơn giản từ dữ liệu nhiều chiều để bạn nhìn nhanh "
-            "mức độ tách biệt giữa các nhóm. Điểm tách biệt cho biết các nhóm khác "
-            "nhau rõ đến mức nào."
+            "PCA tạo bản đồ 2 chiều từ dữ liệu nhiều chiều để bạn nhìn nhanh mức độ "
+            "tách biệt giữa các nhóm."
         )
 
     if len(prepared.numeric_columns) < 2:
@@ -447,12 +471,21 @@ def main() -> None:
             color_map=color_map,
         )
         st.plotly_chart(pca_figure, use_container_width=True)
+        st.caption(
+            "PC1 và PC2 là hai trục tổng hợp quan trọng nhất do PCA tạo ra, "
+            "giúp biểu diễn dữ liệu nhiều chiều lên mặt phẳng 2D."
+        )
 
     if show_elbow:
         if segmentation.wcss_by_group_count is not None and figure_support_available():
             st.plotly_chart(
                 build_wcss_figure(segmentation.wcss_by_group_count),
                 use_container_width=True,
+            )
+            st.caption(
+                "WCSS (Within-Cluster Sum of Squares) là tổng bình phương khoảng cách "
+                "giữa các điểm dữ liệu và tâm cụm của chính chúng. WCSS càng thấp, "
+                "các điểm trong cụm càng chặt."
             )
         elif not figure_support_available():
             show_plotly_missing_message()
@@ -463,9 +496,7 @@ def main() -> None:
         "theo những thước đo quen thuộc như thu nhập, chi tiêu, hoặc độ tuổi."
     )
     if len(prepared.numeric_columns) < 2:
-        st.info(
-            "Khám phá biến cần ít nhất hai cột số để so sánh giữa các thước đo."
-        )
+        st.info("Khám phá biến cần ít nhất hai cột số để so sánh giữa các thước đo.")
     elif not figure_support_available():
         show_plotly_missing_message()
     else:
@@ -490,6 +521,9 @@ def main() -> None:
         "Tải xuống dữ liệu gốc kèm nhãn nhóm do mô hình gán để chia sẻ "
         "hoặc dùng cho các bước xử lý tiếp theo."
     )
+    st.subheader("Xem trước dữ liệu xuất")
+    st.dataframe(export_df.head(100), use_container_width=True)
+    st.caption("Tệp CSV được xuất theo UTF-8 (BOM) để hiển thị tiếng Việt đúng định dạng.")
     st.download_button(
         "Tải xuống CSV đã gán nhóm",
         data=to_csv_bytes(export_df),
