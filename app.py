@@ -45,7 +45,7 @@ CHART_SAMPLE_LIMIT = 12_000
 ELBOW_SAMPLE_LIMIT = 15_000
 EXECUTION_MODE_LABELS = {
     "fast": "Chế độ nhanh",
-    "accurate": "Chế độ chính xác cao",
+    "accurate": "Chế độ chính xác",
 }
 
 # ── ID-column detection ────────────────────────────────────────────────────────
