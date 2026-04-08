@@ -510,14 +510,14 @@ def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
     render_explainer(
-        "Tải CSV lên để tự động làm sạch dữ liệu số, tạo nhóm khách hàng, và khám phá kết quả bằng biểu đồ dễ hiểu cho nghiệp vụ."
+        "Tải CSV lên để tự động làm sạch dữ liệu số, tạo nhóm khách hàng, và khám phá kết quả."
     )
 
     st.header("1. Nạp dữ liệu")
     uploaded_file = st.file_uploader(
         "Tải lên tệp CSV",
         type=["csv"],
-        help="Kéo thả bất kỳ tệp CSV khách hàng hoặc vận hành để bắt đầu.",
+        help="Kéo thả bất kỳ tệp CSV để bắt đầu.",
     )
 
     if uploaded_file is None:
@@ -586,7 +586,7 @@ def main() -> None:
         index=0,
         horizontal=True,
         format_func=lambda option: EXECUTION_MODE_LABELS[option],
-        help="Chế độ nhanh ưu tiên phản hồi nhanh hơn. Chế độ chính xác cao ưu tiên kết quả phân nhóm đầy đủ hơn.",
+        help="Chế độ nhanh ưu tiên phản hồi nhanh hơn. Chế độ chính xác ưu tiên kết quả phân nhóm đầy đủ hơn.",
     )
     max_groups = min(10, row_count)
     control_left, control_right = st.columns([1.5, 1.0])
@@ -606,7 +606,7 @@ def main() -> None:
         )
     elif row_count >= LARGE_DATASET_THRESHOLD:
         st.warning(
-            "Dữ liệu lớn đang chạy ở Chế độ chính xác cao. Thời gian xử lý có thể tăng rõ rệt vì hệ thống ưu tiên "
+            "Dữ liệu lớn đang chạy ở Chế độ chính xác. Thời gian xử lý có thể tăng rõ rệt vì hệ thống ưu tiên "
             "tính toán đầy đủ hơn ở bước phân nhóm và đánh giá."
         )
 
