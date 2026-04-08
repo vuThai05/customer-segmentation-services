@@ -295,8 +295,16 @@ def build_color_map(group_name_map: dict[int, str]) -> dict[str, str]:
     }
 
 
-def build_export_df(df_original: pd.DataFrame, labels: np.ndarray, group_name_map: dict[int, str]) -> pd.DataFrame:
+def build_export_df(
+    df_original: pd.DataFrame,
+    numeric_cleaned_df: pd.DataFrame,
+    labels: np.ndarray,
+    group_name_map: dict[int, str],
+) -> pd.DataFrame:
     export_df = df_original.copy()
+    if not numeric_cleaned_df.empty:
+        for column in numeric_cleaned_df.columns:
+            export_df[column] = numeric_cleaned_df[column].to_numpy()
     export_df["Cluster_Label"] = [group_name_map[int(lbl)] for lbl in labels]
     return export_df
 
@@ -619,7 +627,7 @@ def main() -> None:
             execution_mode=execution_mode,
         )
         group_name_map = build_group_name_map(segmentation.labels)
-        export_df = build_export_df(df, segmentation.labels, group_name_map)
+        export_df = build_export_df(df, prepared.numeric_df, segmentation.labels, group_name_map)
         _, cluster_profile_styler = build_group_profile_table(cluster_numeric_df, segmentation.labels)
 
     color_map = build_color_map(group_name_map)
