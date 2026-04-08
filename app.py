@@ -6,7 +6,7 @@ from io import BytesIO
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, MiniBatchKMeans
 from sklearn.decomposition import PCA
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import silhouette_score
@@ -37,6 +37,16 @@ PROFILE_LEVEL_COLORS = [
     "rgb(250,128,114)",
     "rgb(220,20,60)",
 ]
+RANDOM_STATE = 42
+LARGE_DATASET_THRESHOLD = 50_000
+MINIBATCH_BATCH_SIZE = 4_096
+PCA_SAMPLE_LIMIT = 12_000
+CHART_SAMPLE_LIMIT = 12_000
+ELBOW_SAMPLE_LIMIT = 15_000
+EXECUTION_MODE_LABELS = {
+    "fast": "Chế độ nhanh",
+    "accurate": "Chế độ chính xác cao",
+}
 
 
 @dataclass
@@ -55,11 +65,25 @@ class SegmentationResult:
     wcss_by_group_count: pd.DataFrame | None
     pca_coordinates: np.ndarray | None
     representative_coordinates: np.ndarray | None
+    pca_row_indices: np.ndarray | None
+    used_minibatch: bool
+    elbow_sample_size: int | None
 
 
 @st.cache_data(show_spinner=False)
 def load_csv_from_bytes(file_bytes: bytes) -> pd.DataFrame:
     return pd.read_csv(BytesIO(file_bytes))
+
+
+def is_integer_like_series(series: pd.Series) -> bool:
+    non_null_values = series.dropna()
+    if non_null_values.empty:
+        return False
+    if not pd.api.types.is_numeric_dtype(non_null_values):
+        return False
+
+    numeric_values = non_null_values.to_numpy(dtype=float)
+    return bool(np.all(np.isclose(numeric_values, np.round(numeric_values))))
 
 
 def detect_id_like_columns(numeric_df: pd.DataFrame) -> list[str]:
@@ -85,7 +109,7 @@ def detect_id_like_columns(numeric_df: pd.DataFrame) -> list[str]:
 
         series = numeric_df[column]
         unique_ratio = float(series.nunique(dropna=True)) / float(row_count) if row_count else 0.0
-        is_integer_like = pd.api.types.is_integer_dtype(series)
+        is_integer_like = is_integer_like_series(series)
         if unique_ratio >= 0.5 or is_integer_like:
             dropped_columns.append(column)
 
@@ -98,6 +122,36 @@ def auto_drop_id_columns(numeric_df: pd.DataFrame) -> tuple[pd.DataFrame, list[s
     if not kept_columns:
         return numeric_df.copy(), []
     return numeric_df[kept_columns].copy(), id_like_columns
+
+
+def sample_row_indices(row_count: int, max_rows: int, random_state: int = RANDOM_STATE) -> np.ndarray:
+    if row_count <= max_rows:
+        return np.arange(row_count, dtype=int)
+
+    rng = np.random.default_rng(random_state)
+    return np.sort(rng.choice(row_count, size=max_rows, replace=False).astype(int))
+
+
+def sample_dataframe_and_labels(
+    df: pd.DataFrame,
+    labels: np.ndarray,
+    max_rows: int,
+) -> tuple[pd.DataFrame, np.ndarray, bool]:
+    row_indices = sample_row_indices(len(df), max_rows)
+    was_sampled = len(row_indices) < len(df)
+    return df.iloc[row_indices].copy(), labels[row_indices], was_sampled
+
+
+def build_cluster_model(n_groups: int, use_minibatch: bool):
+    if use_minibatch:
+        return MiniBatchKMeans(
+            n_clusters=n_groups,
+            n_init=10,
+            random_state=RANDOM_STATE,
+            batch_size=MINIBATCH_BATCH_SIZE,
+        )
+
+    return KMeans(n_clusters=n_groups, n_init=10, random_state=RANDOM_STATE)
 
 
 @st.cache_data(show_spinner=False)
@@ -156,7 +210,12 @@ def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
 
 
 @st.cache_data(show_spinner=False)
-def run_segmentation(X_scaled: np.ndarray, n_groups: int, compute_elbow: bool) -> SegmentationResult:
+def run_segmentation(
+    X_scaled: np.ndarray,
+    n_groups: int,
+    compute_elbow: bool,
+    execution_mode: str,
+) -> SegmentationResult:
     if X_scaled.ndim != 2:
         raise ValueError("Expected a two-dimensional feature matrix.")
 
@@ -168,7 +227,9 @@ def run_segmentation(X_scaled: np.ndarray, n_groups: int, compute_elbow: bool) -
     if n_groups > n_samples:
         raise ValueError("Number of groups cannot exceed the number of rows.")
 
-    model = KMeans(n_clusters=n_groups, n_init=10, random_state=42)
+    prefer_speed = execution_mode == "fast"
+    use_minibatch = prefer_speed and n_samples >= LARGE_DATASET_THRESHOLD
+    model = build_cluster_model(n_groups, use_minibatch)
     labels = model.fit_predict(X_scaled)
 
     silhouette_value = None
@@ -180,25 +241,41 @@ def run_segmentation(X_scaled: np.ndarray, n_groups: int, compute_elbow: bool) -
                 X_scaled,
                 labels,
                 sample_size=silhouette_sample_size,
-                random_state=42,
+                random_state=RANDOM_STATE,
             )
         )
 
     wcss_by_group_count = None
+    elbow_sample_size = None
     if compute_elbow:
+        elbow_input = X_scaled
+        if prefer_speed and n_samples > ELBOW_SAMPLE_LIMIT:
+            elbow_indices = sample_row_indices(n_samples, ELBOW_SAMPLE_LIMIT)
+            elbow_input = X_scaled[elbow_indices]
+            elbow_sample_size = len(elbow_indices)
+
         max_group_count = min(10, n_samples)
         elbow_rows: list[dict[str, float | int]] = []
         for group_count in range(2, max_group_count + 1):
-            elbow_model = KMeans(n_clusters=group_count, n_init=10, random_state=42)
-            elbow_model.fit(X_scaled)
+            elbow_model = build_cluster_model(
+                group_count,
+                use_minibatch=len(elbow_input) >= LARGE_DATASET_THRESHOLD,
+            )
+            elbow_model.fit(elbow_input)
             elbow_rows.append({"Số lượng nhóm": group_count, "WCSS": float(elbow_model.inertia_)})
         wcss_by_group_count = pd.DataFrame(elbow_rows) if elbow_rows else None
 
     pca_coordinates = None
     representative_coordinates = None
+    pca_row_indices = None
     if n_features >= 2:
+        pca_input = X_scaled
+        if prefer_speed and n_samples > PCA_SAMPLE_LIMIT:
+            pca_row_indices = sample_row_indices(n_samples, PCA_SAMPLE_LIMIT)
+            pca_input = X_scaled[pca_row_indices]
+
         pca_model = PCA(n_components=2)
-        pca_coordinates = pca_model.fit_transform(X_scaled)
+        pca_coordinates = pca_model.fit_transform(pca_input)
         representative_coordinates = pca_model.transform(model.cluster_centers_)
 
     return SegmentationResult(
@@ -207,6 +284,9 @@ def run_segmentation(X_scaled: np.ndarray, n_groups: int, compute_elbow: bool) -
         wcss_by_group_count=wcss_by_group_count,
         pca_coordinates=pca_coordinates,
         representative_coordinates=representative_coordinates,
+        pca_row_indices=pca_row_indices,
+        used_minibatch=use_minibatch,
+        elbow_sample_size=elbow_sample_size,
     )
 
 
@@ -326,12 +406,13 @@ def build_pca_figure(
     group_name_map = build_group_name_map(labels)
     group_names = np.array([group_name_map[int(label)] for label in labels], dtype=object)
     group_order = list(color_map.keys())
+    scatter_class = getattr(go, "Scattergl", go.Scatter)
 
     fig = go.Figure()
     for group_name in group_order:
         mask = group_names == group_name
         fig.add_trace(
-            go.Scatter(
+            scatter_class(
                 x=pca_coordinates[mask, 0],
                 y=pca_coordinates[mask, 1],
                 mode="markers",
@@ -393,12 +474,13 @@ def build_variable_explorer_figure(
 
     group_name_map = build_group_name_map(labels)
     group_names = np.array([group_name_map[int(label)] for label in labels], dtype=object)
+    scatter_class = getattr(go, "Scattergl", go.Scatter)
 
     fig = go.Figure()
     for group_name, color in color_map.items():
         mask = group_names == group_name
         fig.add_trace(
-            go.Scatter(
+            scatter_class(
                 x=df.loc[mask, x_axis],
                 y=df.loc[mask, y_axis],
                 mode="markers",
@@ -479,7 +561,8 @@ def main() -> None:
 
     try:
         file_bytes = uploaded_file.getvalue()
-        df = load_csv_from_bytes(file_bytes)
+        with st.spinner("Đang đọc tệp CSV..."):
+            df = load_csv_from_bytes(file_bytes)
     except Exception as exc:  # pragma: no cover - depends on file input behavior.
         st.error(f"Không thể đọc tệp CSV này: {exc}")
         return
@@ -488,7 +571,9 @@ def main() -> None:
         st.error("CSV không có dòng dữ liệu. Hãy tải tệp có ít nhất hai dòng.")
         return
 
-    prepared = prepare_numeric_features(df)
+    row_count = len(df.index)
+    with st.spinner("Đang làm sạch dữ liệu số..."):
+        prepared = prepare_numeric_features(df)
     cluster_numeric_df, auto_dropped_id_cols = auto_drop_id_columns(prepared.numeric_df)
     cluster_numeric_columns = cluster_numeric_df.columns.tolist()
 
@@ -534,12 +619,19 @@ def main() -> None:
         st.error("Tệp này không có cột số nên không thể chạy phân nhóm.")
         return
 
-    row_count = len(df.index)
     if row_count < 2:
         st.error("Cần ít nhất hai dòng dữ liệu để phân nhóm.")
         return
 
     st.subheader("Thiết lập mô hình")
+    execution_mode = st.radio(
+        "Chế độ chạy",
+        options=["fast", "accurate"],
+        index=0,
+        horizontal=True,
+        format_func=lambda option: EXECUTION_MODE_LABELS[option],
+        help="Chế độ nhanh ưu tiên phản hồi nhanh hơn. Chế độ chính xác cao ưu tiên kết quả phân nhóm đầy đủ hơn.",
+    )
     max_groups = min(10, row_count)
     control_left, control_right = st.columns([1.5, 1.0])
     with control_left:
@@ -557,14 +649,28 @@ def main() -> None:
             help="Bật để hiển thị biểu đồ Elbow.",
         )
 
-    scaled_for_clustering = scale_numeric_frame(cluster_numeric_df)
-    segmentation = run_segmentation(
-        scaled_for_clustering,
-        number_of_groups,
-        compute_elbow=show_elbow,
-    )
-    export_df = build_export_df(df, segmentation.labels)
-    _, cluster_profile_styler = build_group_profile_table(cluster_numeric_df, segmentation.labels)
+    if row_count >= LARGE_DATASET_THRESHOLD and execution_mode == "fast":
+        st.info(
+            "Dữ liệu lớn đang chạy ở Chế độ nhanh. Phân nhóm và file xuất vẫn chạy trên toàn bộ dữ liệu, "
+            "còn PCA, Elbow và biểu đồ sẽ dùng kỹ thuật tối ưu hoặc mẫu đại diện để tránh treo trình duyệt."
+        )
+    elif row_count >= LARGE_DATASET_THRESHOLD:
+        st.warning(
+            "Dữ liệu lớn đang chạy ở Chế độ chính xác cao. Thời gian xử lý có thể tăng rõ rệt vì hệ thống ưu tiên "
+            "tính toán đầy đủ hơn ở bước phân nhóm và đánh giá."
+        )
+
+    with st.spinner("Đang phân nhóm dữ liệu. Tệp lớn có thể cần thêm thời gian..."):
+        scaled_for_clustering = scale_numeric_frame(cluster_numeric_df)
+        segmentation = run_segmentation(
+            scaled_for_clustering,
+            number_of_groups,
+            compute_elbow=show_elbow,
+            execution_mode=execution_mode,
+        )
+        export_df = build_export_df(df, segmentation.labels)
+        _, cluster_profile_styler = build_group_profile_table(cluster_numeric_df, segmentation.labels)
+
     color_map = build_color_map(segmentation.labels)
     silhouette_label, silhouette_color = describe_silhouette(segmentation.silhouette_value)
 
@@ -588,22 +694,27 @@ def main() -> None:
         render_explainer(
             "PCA (Principal Component Analysis) giúp biểu diễn dữ liệu nhiều chiều lên mặt phẳng."
         )
+        pca_plot_labels = segmentation.labels
+        if segmentation.pca_row_indices is not None:
+            pca_plot_labels = segmentation.labels[segmentation.pca_row_indices]
+            st.info(
+                f"Bản đồ Insight đang hiển thị mẫu {len(pca_plot_labels):,}/{row_count:,} dòng để phản hồi nhanh hơn. "
+                "Phân nhóm và file xuất vẫn dùng toàn bộ dữ liệu."
+            )
         pca_figure = build_pca_figure(
             pca_coordinates=segmentation.pca_coordinates,
-            labels=segmentation.labels,
+            labels=pca_plot_labels,
             representative_coordinates=segmentation.representative_coordinates,
             color_map=color_map,
         )
         st.plotly_chart(pca_figure, use_container_width=True)
-        render_explainer(
-            [
-                "PC1 = w11*x1 + w12*x2 + ... + w1p*xp.",
-                "PC2 = w21*x1 + w22*x2 + ... + w2p*xp.",
-            ]
-        )
 
     if show_elbow:
         if segmentation.wcss_by_group_count is not None and figure_support_available():
+            if segmentation.elbow_sample_size is not None:
+                st.info(
+                    f"Đường Elbow đang tính trên mẫu {segmentation.elbow_sample_size:,}/{row_count:,} dòng để phản hồi nhanh hơn."
+                )
             st.plotly_chart(build_wcss_figure(segmentation.wcss_by_group_count), use_container_width=True)
             render_explainer(
                 [
@@ -619,7 +730,6 @@ def main() -> None:
     render_explainer(
         [
             "Bảng này dùng công thức df.groupby('Cluster').mean() để tính trung bình theo cụm.",
-            "Công thức: mean(c,j) = (1/nc) * Σ(xᵢⱼ) với i thuộc cụm c.",
         ]
     )
 
@@ -633,18 +743,41 @@ def main() -> None:
     elif not figure_support_available():
         show_plotly_missing_message()
     else:
+        x_axis_key = "variable_explorer_x_axis"
+        y_axis_key = "variable_explorer_y_axis"
+
+        if x_axis_key not in st.session_state or st.session_state[x_axis_key] not in cluster_numeric_columns:
+            st.session_state[x_axis_key] = cluster_numeric_columns[0]
+
+        valid_y_options = [column for column in cluster_numeric_columns if column != st.session_state[x_axis_key]]
+        if y_axis_key not in st.session_state or st.session_state[y_axis_key] not in valid_y_options:
+            st.session_state[y_axis_key] = valid_y_options[0]
+
         x_col, y_col = st.columns(2)
         with x_col:
-            x_axis = st.selectbox("Trục X", cluster_numeric_columns, index=0)
-        with y_col:
-            default_y_index = 1 if len(cluster_numeric_columns) > 1 else 0
-            y_axis = st.selectbox("Trục Y", cluster_numeric_columns, index=default_y_index)
+            x_axis = st.selectbox("Trục X", cluster_numeric_columns, key=x_axis_key)
 
+        valid_y_options = [column for column in cluster_numeric_columns if column != x_axis]
+        if st.session_state[y_axis_key] not in valid_y_options:
+            st.session_state[y_axis_key] = valid_y_options[0]
+
+        with y_col:
+            y_axis = st.selectbox("Trục Y", valid_y_options, key=y_axis_key)
+
+        variable_chart_df, variable_chart_labels, variable_chart_sampled = sample_dataframe_and_labels(
+            cluster_numeric_df,
+            segmentation.labels,
+            CHART_SAMPLE_LIMIT,
+        )
+        if variable_chart_sampled:
+            st.info(
+                f"Biểu đồ Khám phá biến đang hiển thị mẫu {len(variable_chart_df):,}/{row_count:,} dòng để tránh đơ trình duyệt."
+            )
         variable_figure = build_variable_explorer_figure(
-            df=cluster_numeric_df,
+            df=variable_chart_df,
             x_axis=x_axis,
             y_axis=y_axis,
-            labels=segmentation.labels,
+            labels=variable_chart_labels,
             color_map=color_map,
         )
         st.plotly_chart(variable_figure, use_container_width=True)
@@ -665,7 +798,7 @@ def main() -> None:
     st.download_button(
         "Tải xuống CSV đã gán nhóm",
         data=to_csv_bytes(export_df),
-        file_name="customer_segmentation_output.csv",
+        file_name="css_output.csv",
         mime="text/csv",
     )
 
