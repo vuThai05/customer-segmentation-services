@@ -542,10 +542,6 @@ def main() -> None:
             ),
             use_container_width=True,
         )
-        render_explainer([
-            "PC1 = w11*x1 + w12*x2 + ... + w1p*xp.",
-            "PC2 = w21*x1 + w22*x2 + ... + w2p*xp.",
-        ])
 
     if show_elbow:
         if segmentation.wcss_by_group_count is not None and has_plotly:
@@ -561,7 +557,6 @@ def main() -> None:
     st.dataframe(cluster_profile_styler, use_container_width=True)
     render_explainer([
         "Bảng này dùng công thức df.groupby('Cluster').mean() để tính trung bình theo cụm.",
-        "Công thức: mean(c,j) = (1/nc) * Σ(xᵢⱼ) với i thuộc cụm c.",
     ])
 
     render_section_divider()
@@ -605,7 +600,7 @@ def main() -> None:
     st.download_button(
         "Tải xuống CSV đã gán nhóm",
         data=to_csv_bytes(export_df),
-        file_name="customer_segmentation_output.csv",
+        file_name="css_output.csv",
         mime="text/csv",
     )
 
