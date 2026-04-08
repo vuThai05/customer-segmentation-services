@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -12,7 +14,7 @@ from sklearn.preprocessing import StandardScaler
 
 try:
     import plotly.graph_objects as go
-except ImportError:  # pragma: no cover - only when Plotly is not installed.
+except ImportError:  # pragma: no cover - only when Plotly is absent.
     go = None
 
 
@@ -29,6 +31,12 @@ COLOR_PALETTE = [
     "#C08497",
     "#7A5C61",
 ]
+PROFILE_LEVEL_COLORS = [
+    "rgb(255,255,255)",
+    "rgb(255,160,122)",
+    "rgb(250,128,114)",
+    "rgb(220,20,60)",
+]
 
 
 @dataclass
@@ -38,21 +46,67 @@ class PreparedNumericFeatures:
     numeric_columns: list[str]
     missing_values_fixed: int
     imputation_details: pd.DataFrame
-    imputer: SimpleImputer | None
-    scaler: StandardScaler | None
 
 
 @dataclass
 class SegmentationResult:
     labels: np.ndarray
-    model: KMeans
     silhouette_value: float | None
     wcss_by_group_count: pd.DataFrame | None
-    pca_model: PCA | None
     pca_coordinates: np.ndarray | None
     representative_coordinates: np.ndarray | None
 
 
+@st.cache_data(show_spinner=False)
+def load_csv_from_bytes(file_bytes: bytes) -> pd.DataFrame:
+    return pd.read_csv(BytesIO(file_bytes))
+
+
+def detect_id_like_columns(numeric_df: pd.DataFrame) -> list[str]:
+    id_keywords = (
+        "id",
+        "invoice",
+        "order",
+        "transaction",
+        "receipt",
+        "serial",
+        "reference",
+        "barcode",
+        "sku",
+    )
+    row_count = len(numeric_df)
+    dropped_columns: list[str] = []
+
+    for column in numeric_df.columns:
+        column_name = str(column).strip().lower()
+        has_keyword = any(keyword in column_name for keyword in id_keywords) or column_name.endswith("no")
+        if not has_keyword:
+            continue
+
+        series = numeric_df[column]
+        unique_ratio = float(series.nunique(dropna=True)) / float(row_count) if row_count else 0.0
+        is_integer_like = pd.api.types.is_integer_dtype(series)
+        if unique_ratio >= 0.5 or is_integer_like:
+            dropped_columns.append(column)
+
+    return dropped_columns
+
+
+def auto_drop_id_columns(numeric_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    id_like_columns = detect_id_like_columns(numeric_df)
+    kept_columns = [column for column in numeric_df.columns if column not in set(id_like_columns)]
+    if not kept_columns:
+        return numeric_df.copy(), []
+    return numeric_df[kept_columns].copy(), id_like_columns
+
+
+@st.cache_data(show_spinner=False)
+def scale_numeric_frame(numeric_df: pd.DataFrame) -> np.ndarray:
+    scaler = StandardScaler()
+    return scaler.fit_transform(numeric_df)
+
+
+@st.cache_data(show_spinner=False)
 def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
     numeric_df = df.select_dtypes(include=[np.number]).copy()
     numeric_columns = numeric_df.columns.tolist()
@@ -66,8 +120,6 @@ def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
             imputation_details=pd.DataFrame(
                 columns=["Cột", "Số giá trị thiếu đã sửa", "Giá trị thay thế (median)"]
             ),
-            imputer=None,
-            scaler=None,
         )
 
     missing_by_column = numeric_df.isna().sum()
@@ -75,14 +127,10 @@ def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
 
     imputer = SimpleImputer(strategy="median")
     cleaned_array = imputer.fit_transform(numeric_df)
-    cleaned_numeric_df = pd.DataFrame(
-        cleaned_array,
-        columns=numeric_columns,
-        index=df.index,
-    )
+    cleaned_numeric_df = pd.DataFrame(cleaned_array, columns=numeric_columns, index=df.index)
 
     median_by_column = pd.Series(imputer.statistics_, index=numeric_columns)
-    detail_rows: list[dict[str, str | int | float]] = []
+    detail_rows: list[dict[str, float | int | str]] = []
     for column in numeric_columns:
         fixed_count = int(missing_by_column[column])
         if fixed_count > 0:
@@ -104,12 +152,11 @@ def prepare_numeric_features(df: pd.DataFrame) -> PreparedNumericFeatures:
         numeric_columns=numeric_columns,
         missing_values_fixed=missing_values_fixed,
         imputation_details=imputation_details,
-        imputer=imputer,
-        scaler=scaler,
     )
 
 
-def run_segmentation(X_scaled: np.ndarray, n_groups: int) -> SegmentationResult:
+@st.cache_data(show_spinner=False)
+def run_segmentation(X_scaled: np.ndarray, n_groups: int, compute_elbow: bool) -> SegmentationResult:
     if X_scaled.ndim != 2:
         raise ValueError("Expected a two-dimensional feature matrix.")
 
@@ -127,22 +174,26 @@ def run_segmentation(X_scaled: np.ndarray, n_groups: int) -> SegmentationResult:
     silhouette_value = None
     unique_label_count = len(np.unique(labels))
     if 1 < unique_label_count < n_samples:
-        silhouette_value = float(silhouette_score(X_scaled, labels))
-
-    max_group_count = min(10, n_samples)
-    elbow_rows: list[dict[str, float | int]] = []
-    for group_count in range(2, max_group_count + 1):
-        elbow_model = KMeans(n_clusters=group_count, n_init=10, random_state=42)
-        elbow_model.fit(X_scaled)
-        elbow_rows.append(
-            {
-                "Số lượng nhóm": group_count,
-                "WCSS": float(elbow_model.inertia_),
-            }
+        silhouette_sample_size = min(5000, n_samples)
+        silhouette_value = float(
+            silhouette_score(
+                X_scaled,
+                labels,
+                sample_size=silhouette_sample_size,
+                random_state=42,
+            )
         )
-    wcss_by_group_count = pd.DataFrame(elbow_rows) if elbow_rows else None
 
-    pca_model = None
+    wcss_by_group_count = None
+    if compute_elbow:
+        max_group_count = min(10, n_samples)
+        elbow_rows: list[dict[str, float | int]] = []
+        for group_count in range(2, max_group_count + 1):
+            elbow_model = KMeans(n_clusters=group_count, n_init=10, random_state=42)
+            elbow_model.fit(X_scaled)
+            elbow_rows.append({"Số lượng nhóm": group_count, "WCSS": float(elbow_model.inertia_)})
+        wcss_by_group_count = pd.DataFrame(elbow_rows) if elbow_rows else None
+
     pca_coordinates = None
     representative_coordinates = None
     if n_features >= 2:
@@ -152,10 +203,8 @@ def run_segmentation(X_scaled: np.ndarray, n_groups: int) -> SegmentationResult:
 
     return SegmentationResult(
         labels=labels,
-        model=model,
         silhouette_value=silhouette_value,
         wcss_by_group_count=wcss_by_group_count,
-        pca_model=pca_model,
         pca_coordinates=pca_coordinates,
         representative_coordinates=representative_coordinates,
     )
@@ -163,10 +212,7 @@ def run_segmentation(X_scaled: np.ndarray, n_groups: int) -> SegmentationResult:
 
 def build_group_name_map(labels: np.ndarray) -> dict[int, str]:
     unique_labels = sorted(int(label) for label in np.unique(labels))
-    return {
-        label: f"Nhóm {position}"
-        for position, label in enumerate(unique_labels, start=1)
-    }
+    return {label: f"Nhóm {position}" for position, label in enumerate(unique_labels, start=1)}
 
 
 def build_color_map(labels: np.ndarray) -> dict[str, str]:
@@ -182,6 +228,76 @@ def build_export_df(df_original: pd.DataFrame, labels: np.ndarray) -> pd.DataFra
     group_name_map = build_group_name_map(labels)
     export_df["Cluster_Label"] = [group_name_map[int(label)] for label in labels]
     return export_df
+
+
+def build_group_profile_table(numeric_df: pd.DataFrame, labels: np.ndarray):
+    profile_df = numeric_df.copy()
+    profile_df["Cluster"] = labels.astype(int)
+    summary_table = profile_df.groupby("Cluster").mean().round(3)
+
+    def style_four_levels(column: pd.Series) -> list[str]:
+        if column.dropna().empty:
+            return [f"background-color: {PROFILE_LEVEL_COLORS[0]}; color: #000000;"] * len(column)
+
+        q1, q2, q3 = column.quantile([0.25, 0.5, 0.75]).tolist()
+        cell_styles: list[str] = []
+        for value in column:
+            if pd.isna(value) or value <= q1:
+                color = PROFILE_LEVEL_COLORS[0]
+            elif value <= q2:
+                color = PROFILE_LEVEL_COLORS[1]
+            elif value <= q3:
+                color = PROFILE_LEVEL_COLORS[2]
+            else:
+                color = PROFILE_LEVEL_COLORS[3]
+            cell_styles.append(f"background-color: {color}; color: #000000;")
+        return cell_styles
+
+    def format_max_3_decimals(value: float) -> str:
+        if pd.isna(value):
+            return ""
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+
+    styled_summary = (
+        summary_table.style.apply(style_four_levels, axis=0)
+        .format(format_max_3_decimals)
+        .set_properties(**{"color": "#000000", "font-size": "1.02rem", "font-weight": "600"})
+        .set_table_styles(
+            [
+                {
+                    "selector": "th",
+                    "props": [("color", "#000000"), ("font-size", "1.02rem"), ("font-weight", "700")],
+                }
+            ]
+        )
+    )
+    return summary_table, styled_summary
+
+
+def render_explainer(lines: str | list[str]) -> None:
+    if isinstance(lines, str):
+        normalized_lines = [lines.strip()]
+    else:
+        normalized_lines = [line.strip() for line in lines if line.strip()]
+    if not normalized_lines:
+        return
+
+    line_html = "".join(f"<div style='margin:0.10rem 0;'>✨ {line}</div>" for line in normalized_lines)
+    st.markdown(
+        (
+            "<div style='font-size:1.45rem; color:#000000; line-height:1.5; "
+            "font-weight:600; text-align:left; margin:0.25rem 0 0.5rem 0;'>"
+            f"{line_html}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_divider() -> None:
+    st.markdown(
+        "<hr style='border:0; border-top:1px solid #4B5563; margin:1rem 0 1.2rem 0;'>",
+        unsafe_allow_html=True,
+    )
 
 
 def describe_silhouette(score: float | None) -> tuple[str, str]:
@@ -204,7 +320,7 @@ def build_pca_figure(
     representative_coordinates: np.ndarray,
     color_map: dict[str, str],
 ) -> "go.Figure":
-    if go is None:  # pragma: no cover - guarded in the UI.
+    if go is None:  # pragma: no cover - guarded in UI.
         raise RuntimeError("Plotly is required to build figures.")
 
     group_name_map = build_group_name_map(labels)
@@ -220,11 +336,7 @@ def build_pca_figure(
                 y=pca_coordinates[mask, 1],
                 mode="markers",
                 name=group_name,
-                marker={
-                    "size": 10,
-                    "opacity": 0.8,
-                    "color": color_map[group_name],
-                },
+                marker={"size": 10, "opacity": 0.8, "color": color_map[group_name]},
                 hovertemplate="Nhóm=%{text}<br>PC1=%{x:.2f}<br>PC2=%{y:.2f}<extra></extra>",
                 text=[group_name] * int(mask.sum()),
             )
@@ -260,8 +372,8 @@ def build_pca_figure(
 
     fig.update_layout(
         title="Bản đồ Insight tổng quan",
-        xaxis_title="PC1 (Thành phần chính 1)",
-        yaxis_title="PC2 (Thành phần chính 2)",
+        xaxis_title="PC1",
+        yaxis_title="PC2",
         legend_title="Nhóm",
         template="plotly_white",
         height=560,
@@ -276,7 +388,7 @@ def build_variable_explorer_figure(
     labels: np.ndarray,
     color_map: dict[str, str],
 ) -> "go.Figure":
-    if go is None:  # pragma: no cover - guarded in the UI.
+    if go is None:  # pragma: no cover - guarded in UI.
         raise RuntimeError("Plotly is required to build figures.")
 
     group_name_map = build_group_name_map(labels)
@@ -312,7 +424,7 @@ def build_variable_explorer_figure(
 
 
 def build_wcss_figure(wcss_by_group_count: pd.DataFrame) -> "go.Figure":
-    if go is None:  # pragma: no cover - guarded in the UI.
+    if go is None:  # pragma: no cover - guarded in UI.
         raise RuntimeError("Plotly is required to build figures.")
 
     fig = go.Figure(
@@ -329,7 +441,7 @@ def build_wcss_figure(wcss_by_group_count: pd.DataFrame) -> "go.Figure":
     fig.update_layout(
         title="Đường Elbow đánh giá chất lượng nhóm",
         xaxis_title="Số lượng nhóm",
-        yaxis_title="WCSS (Within-Cluster Sum of Squares)",
+        yaxis_title="WCSS",
         template="plotly_white",
         height=380,
     )
@@ -337,7 +449,6 @@ def build_wcss_figure(wcss_by_group_count: pd.DataFrame) -> "go.Figure":
 
 
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
-    # utf-8-sig adds BOM so Vietnamese text like "Nhóm" opens correctly in Excel.
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
@@ -351,9 +462,8 @@ def show_plotly_missing_message() -> None:
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
-    st.caption(
-        "Tải CSV lên để tự động làm sạch dữ liệu số, tạo nhóm khách hàng, "
-        "và khám phá kết quả bằng biểu đồ dễ hiểu cho nghiệp vụ."
+    render_explainer(
+        "Tải CSV lên để tự động làm sạch dữ liệu số, tạo nhóm khách hàng, và khám phá kết quả bằng biểu đồ dễ hiểu cho nghiệp vụ."
     )
 
     st.header("1. Nạp dữ liệu")
@@ -368,7 +478,8 @@ def main() -> None:
         return
 
     try:
-        df = pd.read_csv(uploaded_file)
+        file_bytes = uploaded_file.getvalue()
+        df = load_csv_from_bytes(file_bytes)
     except Exception as exc:  # pragma: no cover - depends on file input behavior.
         st.error(f"Không thể đọc tệp CSV này: {exc}")
         return
@@ -378,6 +489,8 @@ def main() -> None:
         return
 
     prepared = prepare_numeric_features(df)
+    cluster_numeric_df, auto_dropped_id_cols = auto_drop_id_columns(prepared.numeric_df)
+    cluster_numeric_columns = cluster_numeric_df.columns.tolist()
 
     preview_col, health_col = st.columns([2.3, 1.2])
     with preview_col:
@@ -395,15 +508,27 @@ def main() -> None:
         else:
             st.write("Các cột số được dùng: không có")
 
+    if auto_dropped_id_cols:
+        st.info(
+            "Tự động bỏ cột ID khỏi phân cụm: "
+            + ", ".join(auto_dropped_id_cols)
+        )
+
     if prepared.missing_values_fixed > 0 and not prepared.imputation_details.empty:
         st.write("Chi tiết các giá trị thiếu đã tự sửa:")
-        st.dataframe(
-            prepared.imputation_details,
-            hide_index=True,
-            use_container_width=True,
+        st.dataframe(prepared.imputation_details, hide_index=True, use_container_width=True)
+        render_explainer(
+            [
+                "Mỗi giá trị thiếu sẽ được thay bằng trung vị của chính cột đó.",
+                "Công thức điền thiếu: x_thiếu = median(cột).",
+            ]
         )
     else:
-        st.info("Không có giá trị thiếu cần tự sửa trong các cột số.")
+        render_explainer(
+            [
+                "Không có giá trị thiếu cần tự sửa trong các cột số.",
+            ]
+        )
 
     if not prepared.numeric_columns:
         st.error("Tệp này không có cột số nên không thể chạy phân nhóm.")
@@ -429,34 +554,30 @@ def main() -> None:
         show_elbow = st.toggle(
             "Hiện biểu đồ Elbow",
             value=False,
-            help="Biểu đồ này giúp bạn so sánh chất lượng khi thay đổi số lượng nhóm.",
+            help="Bật để hiển thị biểu đồ Elbow.",
         )
 
-    segmentation = run_segmentation(prepared.scaled_array, number_of_groups)
+    scaled_for_clustering = scale_numeric_frame(cluster_numeric_df)
+    segmentation = run_segmentation(
+        scaled_for_clustering,
+        number_of_groups,
+        compute_elbow=show_elbow,
+    )
     export_df = build_export_df(df, segmentation.labels)
+    _, cluster_profile_styler = build_group_profile_table(cluster_numeric_df, segmentation.labels)
     color_map = build_color_map(segmentation.labels)
     silhouette_label, silhouette_color = describe_silhouette(segmentation.silhouette_value)
 
+    render_section_divider()
     st.header("2. Insight tổng quan")
-    metric_col, explainer_col = st.columns([1, 2])
-    with metric_col:
-        metric_value = (
-            f"{segmentation.silhouette_value:.3f}"
-            if segmentation.silhouette_value is not None
-            else "N/A"
-        )
-        st.metric("Điểm tách biệt", metric_value)
-        st.markdown(
-            f"<div style='color:{silhouette_color}; font-weight:600;'>{silhouette_label}</div>",
-            unsafe_allow_html=True,
-        )
-    with explainer_col:
-        st.info(
-            "PCA tạo bản đồ 2 chiều từ dữ liệu nhiều chiều để bạn nhìn nhanh mức độ "
-            "tách biệt giữa các nhóm."
-        )
+    metric_value = f"{segmentation.silhouette_value:.3f}" if segmentation.silhouette_value is not None else "N/A"
+    st.metric("Điểm tách biệt", metric_value)
+    st.markdown(
+        f"<div style='color:{silhouette_color}; font-weight:600;'>{silhouette_label}</div>",
+        unsafe_allow_html=True,
+    )
 
-    if len(prepared.numeric_columns) < 2:
+    if len(cluster_numeric_columns) < 2:
         st.info(
             "Bản đồ Insight cần ít nhất hai cột số. Hệ thống vẫn phân nhóm, "
             "nhưng sẽ tắt biểu đồ PCA 2D cho tệp này."
@@ -464,6 +585,9 @@ def main() -> None:
     elif not figure_support_available():
         show_plotly_missing_message()
     else:
+        render_explainer(
+            "PCA (Principal Component Analysis) giúp biểu diễn dữ liệu nhiều chiều lên mặt phẳng."
+        )
         pca_figure = build_pca_figure(
             pca_coordinates=segmentation.pca_coordinates,
             labels=segmentation.labels,
@@ -471,44 +595,53 @@ def main() -> None:
             color_map=color_map,
         )
         st.plotly_chart(pca_figure, use_container_width=True)
-        st.caption(
-            "PC1 và PC2 là hai trục tổng hợp quan trọng nhất do PCA tạo ra, "
-            "giúp biểu diễn dữ liệu nhiều chiều lên mặt phẳng 2D."
+        render_explainer(
+            [
+                "PC1 = w11*x1 + w12*x2 + ... + w1p*xp.",
+                "PC2 = w21*x1 + w22*x2 + ... + w2p*xp.",
+            ]
         )
 
     if show_elbow:
         if segmentation.wcss_by_group_count is not None and figure_support_available():
-            st.plotly_chart(
-                build_wcss_figure(segmentation.wcss_by_group_count),
-                use_container_width=True,
-            )
-            st.caption(
-                "WCSS (Within-Cluster Sum of Squares) là tổng bình phương khoảng cách "
-                "giữa các điểm dữ liệu và tâm cụm của chính chúng. WCSS càng thấp, "
-                "các điểm trong cụm càng chặt."
+            st.plotly_chart(build_wcss_figure(segmentation.wcss_by_group_count), use_container_width=True)
+            render_explainer(
+                [
+                    "WCSS là tổng bình phương khoảng cách giữa các điểm dữ liệu và tâm cụm của chúng.",
+                    "WCSS càng thấp thì các điểm trong cụm càng chặt.",
+                ]
             )
         elif not figure_support_available():
             show_plotly_missing_message()
 
-    st.header("3. Khám phá biến")
-    st.info(
-        "Biểu đồ này giữ nguyên đơn vị gốc để người dùng nghiệp vụ xem các nhóm "
-        "theo những thước đo quen thuộc như thu nhập, chi tiêu, hoặc độ tuổi."
+    st.subheader("Bảng hồ sơ nhóm (Group Profiling Table)")
+    st.dataframe(cluster_profile_styler, use_container_width=True)
+    render_explainer(
+        [
+            "Bảng này dùng công thức df.groupby('Cluster').mean() để tính trung bình theo cụm.",
+            "Công thức: mean(c,j) = (1/nc) * Σ(xᵢⱼ) với i thuộc cụm c.",
+        ]
     )
-    if len(prepared.numeric_columns) < 2:
+
+    render_section_divider()
+    st.header("3. Khám phá biến")
+    render_explainer(
+        "Biểu đồ này giữ nguyên đơn vị gốc để người dùng nghiệp vụ xem các nhóm theo những thước đo nhất định."
+    )
+    if len(cluster_numeric_columns) < 2:
         st.info("Khám phá biến cần ít nhất hai cột số để so sánh giữa các thước đo.")
     elif not figure_support_available():
         show_plotly_missing_message()
     else:
         x_col, y_col = st.columns(2)
         with x_col:
-            x_axis = st.selectbox("Trục X", prepared.numeric_columns, index=0)
+            x_axis = st.selectbox("Trục X", cluster_numeric_columns, index=0)
         with y_col:
-            default_y_index = 1 if len(prepared.numeric_columns) > 1 else 0
-            y_axis = st.selectbox("Trục Y", prepared.numeric_columns, index=default_y_index)
+            default_y_index = 1 if len(cluster_numeric_columns) > 1 else 0
+            y_axis = st.selectbox("Trục Y", cluster_numeric_columns, index=default_y_index)
 
         variable_figure = build_variable_explorer_figure(
-            df=prepared.numeric_df,
+            df=cluster_numeric_df,
             x_axis=x_axis,
             y_axis=y_axis,
             labels=segmentation.labels,
@@ -516,14 +649,19 @@ def main() -> None:
         )
         st.plotly_chart(variable_figure, use_container_width=True)
 
+    render_section_divider()
     st.header("4. Xuất dữ liệu")
-    st.write(
-        "Tải xuống dữ liệu gốc kèm nhãn nhóm do mô hình gán để chia sẻ "
-        "hoặc dùng cho các bước xử lý tiếp theo."
+    st.markdown(
+        (
+            "<div style='font-size:1.1rem; color:#000000; font-weight:600; "
+            "line-height:1.5; margin:0.2rem 0 0.6rem 0;'>"
+            "Tải xuống dữ liệu gốc kèm nhãn nhóm do mô hình gán."
+            "</div>"
+        ),
+        unsafe_allow_html=True,
     )
     st.subheader("Xem trước dữ liệu xuất")
     st.dataframe(export_df.head(100), use_container_width=True)
-    st.caption("Tệp CSV được xuất theo UTF-8 (BOM) để hiển thị tiếng Việt đúng định dạng.")
     st.download_button(
         "Tải xuống CSV đã gán nhóm",
         data=to_csv_bytes(export_df),
